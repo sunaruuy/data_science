@@ -141,7 +141,7 @@ def lstm_detection():
         recon_train = np.vstack(recon_train_batches)
     seq_err_train = _sequence_errors(train_eval_sequences, recon_train)
     row_err_train = _row_errors_from_sequence_errors(seq_err_train, len(train_block), seq_len)
-    threshold = np.percentile(row_err_train, 20)
+    threshold = np.percentile(row_err_train, 99)
 
     test_normal_block = scaler.transform(normal_data_raw[train_size:])
     fraud_block = scaler.transform(X_sampled_raw[y_sampled == 1])
