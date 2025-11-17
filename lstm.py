@@ -79,11 +79,17 @@ def lstm_detection():
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.MSELoss()
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
     data_tensor = torch.tensor(train_sequences, dtype=torch.float32)
     n = data_tensor.shape[0]
     val_size = int(0.1 * n)
     train_tensor = data_tensor[:-val_size] if val_size > 0 else data_tensor
     val_tensor = data_tensor[-val_size:] if val_size > 0 else None
+
+    if val_tensor is not None:
+        val_tensor = val_tensor.to(device)
 
     batch_size = 128
     train_loader = torch.utils.data.DataLoader(train_tensor, batch_size=batch_size, shuffle=True)
@@ -97,6 +103,7 @@ def lstm_detection():
         total_loss = 0.0
         total_count = 0
         for batch in train_loader:
+            batch = batch.to(device)
             optimizer.zero_grad()
             recon = model(batch)
             loss = criterion(recon, batch)
@@ -129,7 +136,7 @@ def lstm_detection():
         recon_train_batches = []
         for i in range(0, len(train_eval_sequences), 128):
             batch = torch.tensor(train_eval_sequences[i:i+128], dtype=torch.float32)
-            out = model(batch).cpu().numpy()
+            out = model(batch.to(device)).cpu().numpy()
             recon_train_batches.append(out)
         recon_train = np.vstack(recon_train_batches)
     seq_err_train = _sequence_errors(train_eval_sequences, recon_train)
@@ -146,7 +153,7 @@ def lstm_detection():
         recon_batches = []
         for i in range(0, len(eval_sequences), 128):
             batch = torch.tensor(eval_sequences[i:i+128], dtype=torch.float32)
-            out = model(batch).cpu().numpy()
+            out = model(batch.to(device)).cpu().numpy()
             recon_batches.append(out)
         recon = np.vstack(recon_batches)
     seq_err = _sequence_errors(eval_sequences, recon)

@@ -64,11 +64,17 @@ def autoencoder_detection():
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.MSELoss()
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
     data_tensor = torch.tensor(train_data, dtype=torch.float32)
     n = data_tensor.shape[0]
     val_size = int(0.1 * n)
     train_tensor = data_tensor[:-val_size] if val_size > 0 else data_tensor
     val_tensor = data_tensor[-val_size:] if val_size > 0 else None
+
+    if val_tensor is not None:
+        val_tensor = val_tensor.to(device)
 
     batch_size = 256
     train_loader = torch.utils.data.DataLoader(train_tensor, batch_size=batch_size, shuffle=True)
@@ -78,6 +84,7 @@ def autoencoder_detection():
         total_loss = 0.0
         total_count = 0
         for batch in train_loader:
+            batch = batch.to(device)
             optimizer.zero_grad()
             recon = model(batch)
             loss = criterion(recon, batch)
@@ -98,7 +105,7 @@ def autoencoder_detection():
         train_recon = []
         for i in range(0, len(train_data), 256):
             batch = torch.tensor(train_data[i:i+256], dtype=torch.float32)
-            out = model(batch).cpu().numpy()
+            out = model(batch.to(device)).cpu().numpy()
             train_recon.append(out)
         train_recon = np.vstack(train_recon)
     train_mse = np.mean(np.power(train_data - train_recon, 2), axis=1)
@@ -111,7 +118,7 @@ def autoencoder_detection():
         reconstructions = []
         for i in range(0, len(X_test), 256):
             batch = torch.tensor(X_test[i:i+256], dtype=torch.float32)
-            out = model(batch).cpu().numpy()
+            out = model(batch.to(device)).cpu().numpy()
             reconstructions.append(out)
         reconstructions = np.vstack(reconstructions)
     mse = np.mean(np.power(X_test - reconstructions, 2), axis=1)
