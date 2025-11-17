@@ -1,10 +1,8 @@
 import pandas as pd
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Dropout, LayerNormalization, MultiHeadAttention, TimeDistributed
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, average_precision_score, precision_score, recall_score, f1_score, matthews_corrcoef, cohen_kappa_score
 
@@ -62,31 +60,97 @@ def transformer_detection():
     ff_dim = 128
     n_blocks = 2
 
-    inp = Input(shape=(seq_len, input_dim))
-    x = Dense(d_model)(inp)
-    for _ in range(n_blocks):
-        attn_out = MultiHeadAttention(num_heads=4, key_dim=d_model)(x, x)
-        x = LayerNormalization(epsilon=1e-6)(x + Dropout(0.1)(attn_out))
-        ffn = Dense(ff_dim, activation='relu')(x)
-        ffn = Dense(d_model)(ffn)
-        x = LayerNormalization(epsilon=1e-6)(x + Dropout(0.1)(ffn))
-    out = TimeDistributed(Dense(input_dim))(x)
-    model = Model(inputs=inp, outputs=out)
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    class TransformerBlock(nn.Module):
+        def __init__(self, d_model, n_heads, ff_dim, dropout=0.1):
+            super().__init__()
+            self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+            self.norm1 = nn.LayerNorm(d_model)
+            self.ffn = nn.Sequential(
+                nn.Linear(d_model, ff_dim),
+                nn.ReLU(),
+                nn.Linear(ff_dim, d_model),
+            )
+            self.norm2 = nn.LayerNorm(d_model)
+            self.dropout = nn.Dropout(dropout)
 
-    es = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    model.fit(
-        train_sequences, train_sequences,
-        epochs=50,
-        batch_size=128,
-        shuffle=True,
-        validation_split=0.1,
-        callbacks=[es],
-        verbose=1
-    )
+        def forward(self, x):
+            attn_out, _ = self.attn(x, x, x)
+            x = self.norm1(x + self.dropout(attn_out))
+            ffn_out = self.ffn(x)
+            x = self.norm2(x + self.dropout(ffn_out))
+            return x
+
+    class TransformerAE(nn.Module):
+        def __init__(self, input_dim, d_model, ff_dim, n_blocks):
+            super().__init__()
+            self.proj = nn.Linear(input_dim, d_model)
+            self.blocks = nn.ModuleList([TransformerBlock(d_model, 4, ff_dim) for _ in range(n_blocks)])
+            self.to_out = nn.Linear(d_model, input_dim)
+
+        def forward(self, x):
+            x = self.proj(x)
+            for blk in self.blocks:
+                x = blk(x)
+            out = self.to_out(x)
+            return out
+
+    model = TransformerAE(input_dim, d_model, ff_dim, n_blocks)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+
+    data_tensor = torch.tensor(train_sequences, dtype=torch.float32)
+    n = data_tensor.shape[0]
+    val_size = int(0.1 * n)
+    train_tensor = data_tensor[:-val_size] if val_size > 0 else data_tensor
+    val_tensor = data_tensor[-val_size:] if val_size > 0 else None
+
+    batch_size = 128
+    train_loader = torch.utils.data.DataLoader(train_tensor, batch_size=batch_size, shuffle=True)
+
+    best_val = float('inf')
+    best_state = None
+    patience = 5
+    wait = 0
+    for epoch in range(50):
+        model.train()
+        total_loss = 0.0
+        total_count = 0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            recon = model(batch)
+            loss = criterion(recon, batch)
+            loss.backward()
+            optimizer.step()
+            bs = batch.shape[0]
+            total_loss += loss.item() * bs
+            total_count += bs
+        epoch_loss = total_loss / max(total_count, 1)
+        print(f"Epoch {epoch+1}: loss {epoch_loss:.6f}")
+        if val_tensor is not None:
+            model.eval()
+            with torch.no_grad():
+                val_recon = model(val_tensor)
+                val_loss = criterion(val_recon, val_tensor).item()
+            if val_loss < best_val:
+                best_val = val_loss
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                wait = 0
+            else:
+                wait += 1
+                if wait >= patience:
+                    if best_state is not None:
+                        model.load_state_dict(best_state)
+                    break
 
     train_eval_sequences = _create_sequences(train_block, seq_len)
-    recon_train = model.predict(train_eval_sequences, batch_size=128, verbose=0)
+    model.eval()
+    with torch.no_grad():
+        recon_train_batches = []
+        for i in range(0, len(train_eval_sequences), 128):
+            batch = torch.tensor(train_eval_sequences[i:i+128], dtype=torch.float32)
+            out = model(batch).cpu().numpy()
+            recon_train_batches.append(out)
+        recon_train = np.vstack(recon_train_batches)
     seq_err_train = _sequence_errors(train_eval_sequences, recon_train)
     row_err_train = _row_errors_from_sequence_errors(seq_err_train, len(train_block), seq_len)
     threshold = np.percentile(row_err_train, 95)
@@ -97,7 +161,13 @@ def transformer_detection():
     y_test = np.array([0] * len(test_normal_block) + [1] * len(fraud_block))
 
     eval_sequences = _create_sequences(X_test_block, seq_len)
-    recon = model.predict(eval_sequences, batch_size=128, verbose=0)
+    with torch.no_grad():
+        recon_batches = []
+        for i in range(0, len(eval_sequences), 128):
+            batch = torch.tensor(eval_sequences[i:i+128], dtype=torch.float32)
+            out = model(batch).cpu().numpy()
+            recon_batches.append(out)
+        recon = np.vstack(recon_batches)
     seq_err = _sequence_errors(eval_sequences, recon)
     row_err = _row_errors_from_sequence_errors(seq_err, len(X_test_block), seq_len)
     y_pred_binary = [1 if e > threshold else 0 for e in row_err]
